@@ -20,11 +20,27 @@ final class Poll
     public function activate(): void
     {
         if ($this->workInProgress++ === 0) {
-            $this->workInProgressTimer = $this->loop->addPeriodicTimer($this->workInterval, static function () {
-                if (!\GuzzleHttp\Promise\Utils::queue()->isEmpty()) {
-                    \GuzzleHttp\Promise\Utils::queue()->run();
-                }
-            });
+            $this->schedulePoll();
+        }
+    }
+
+    private function schedulePoll(): void
+    {
+        $this->workInProgressTimer = $this->loop->addPeriodicTimer($this->workInterval, function () {
+            $this->runQueue();
+        });
+
+        $this->loop->futureTick(function () {
+            if ($this->workInProgress > 0) {
+                $this->runQueue();
+            }
+        });
+    }
+
+    private function runQueue(): void
+    {
+        if (!\GuzzleHttp\Promise\Utils::queue()->isEmpty()) {
+            \GuzzleHttp\Promise\Utils::queue()->run();
         }
     }
 

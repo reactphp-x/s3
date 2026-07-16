@@ -36,7 +36,18 @@ final class HttpClientAdapter
             : $this->browser->request($method, $url, $headers, $this->normalizeBody($body));
 
         $http->then(
-            function ($response) use ($promise) {
+            function ($response) use ($promise, $options) {
+                if (!empty($options['stream'])) {
+                    $source = $response->getBody();
+                    $buffered = new BufferingBodyStream(
+                        $source instanceof \Psr\Http\Message\StreamInterface ? $source->getSize() : null,
+                    );
+                    if ($source instanceof \React\Stream\ReadableStreamInterface) {
+                        $buffered->attach($source);
+                    }
+                    $response = $response->withBody($buffered);
+                }
+
                 $promise->resolve($response);
             },
             function ($error) use ($promise) {

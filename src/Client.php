@@ -14,7 +14,6 @@ use React\Promise\Promise;
 use React\Promise\PromiseInterface;
 use React\Promise\Stream;
 use React\Stream\ReadableStreamInterface;
-use React\Stream\ThroughStream;
 use React\Stream\WritableStreamInterface;
 
 final class Client
@@ -99,19 +98,8 @@ final class Client
      */
     public function readStream(string $key, int $offset = 0, ?int $maxlen = null): ReadableStreamInterface
     {
-        $params = [
-            'Bucket' => $this->bucket,
-            'Key' => $key,
-            '@http' => ['stream' => true],
-        ];
-
-        if ($offset > 0 || $maxlen !== null) {
-            $range = 'bytes=' . $offset . '-';
-            if ($maxlen !== null) {
-                $range .= ($offset + $maxlen - 1);
-            }
-            $params['Range'] = $range;
-        }
+        $params = $this->readParams($key, $offset, $maxlen);
+        $params['@http'] = ['stream' => true];
 
         return Stream\unwrapReadable(
             $this->execute(function () use ($params) {
@@ -125,12 +113,12 @@ final class Client
      */
     public function writeStream(string $key, ?int $size = null, array $options = []): WritableStreamInterface
     {
-        $stream = new ThroughStream();
+        $stream = new UploadStream();
 
         $params = array_merge([
             'Bucket' => $this->bucket,
             'Key' => $key,
-            'Body' => $stream,
+            'Body' => new ReadableStreamBody($stream->source(), $size),
             'ContentType' => MimeType::fromKey($key),
             'ContentSHA256' => SignatureV4::UNSIGNED_PAYLOAD,
         ], $options);
@@ -147,11 +135,12 @@ final class Client
         $this->execute(function () use ($params) {
             return $this->s3->putObjectAsync($params);
         })->then(
-            null,
-            function (\Throwable $error) use ($stream) {
-                $stream->emit('error', [$error]);
-                $stream->close();
-            }
+            static function () use ($stream): void {
+                $stream->complete();
+            },
+            static function (\Throwable $error) use ($stream): void {
+                $stream->fail($error);
+            },
         );
 
         return $stream;
@@ -237,6 +226,24 @@ final class Client
         return (string) $this->s3->createPresignedRequest($cmd, $expires)->getUri();
     }
 
+    private function readParams(string $key, int $offset, ?int $maxlen): array
+    {
+        $params = [
+            'Bucket' => $this->bucket,
+            'Key' => $key,
+        ];
+
+        if ($offset > 0 || $maxlen !== null) {
+            $range = 'bytes=' . $offset . '-';
+            if ($maxlen !== null) {
+                $range .= ($offset + $maxlen - 1);
+            }
+            $params['Range'] = $range;
+        }
+
+        return $params;
+    }
+
     private function execute(callable $callback): PromiseInterface
     {
         $this->poll->activate();
@@ -247,7 +254,7 @@ final class Client
                 $promise = $callback();
                 $promise->then(
                     function ($result) use ($resolve) {
-                        $this->poll->deactivate();
+                        $this->deferPollDeactivate($result);
                         $resolve($result);
                     },
                     function ($error) use ($reject) {
@@ -260,6 +267,36 @@ final class Client
                 $reject($error);
             }
         });
+    }
+
+    private function deferPollDeactivate(mixed $result): void
+    {
+        $body = null;
+
+        if (is_array($result) && isset($result['Body'])) {
+            $body = $result['Body'];
+        } elseif (is_object($result) && isset($result['Body'])) {
+            $body = $result['Body'];
+        }
+
+        if ($body instanceof ReadableStreamInterface) {
+            $deactivated = false;
+            $deactivate = function () use (&$deactivated): void {
+                if ($deactivated) {
+                    return;
+                }
+
+                $deactivated = true;
+                $this->poll->deactivate();
+            };
+
+            $body->on('close', $deactivate);
+            $body->on('error', $deactivate);
+
+            return;
+        }
+
+        $this->poll->deactivate();
     }
 
     private function toObjectStat(string $key, array $metadata): ObjectStat

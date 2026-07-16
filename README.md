@@ -159,6 +159,16 @@ $client->write('a.txt', 'A')
 
 流式上传使用 `UNSIGNED-PAYLOAD` 签名，已知大小时请传入 `$size` 以便设置 `Content-Length`（与 react/http 行为一致）。
 
+## 测试
+
+复制 `.env.example` 为 `.env`，填写测试存储桶凭据后运行：
+
+```bash
+composer test
+```
+
+集成测试只会使用 `reactphp-x-s3-tests/{随机值}/` 前缀，并且只清理当前测试创建的对象，不会删除存储桶中已有的对象。
+
 ## License
 
 MIT
