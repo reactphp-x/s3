@@ -4,6 +4,7 @@ namespace ReactphpX\S3;
 
 use Evenement\EventEmitter;
 use Psr\Http\Message\StreamInterface;
+use React\EventLoop\Loop;
 use React\Stream\ReadableStreamInterface;
 use React\Stream\Util;
 use React\Stream\WritableStreamInterface;
@@ -17,21 +18,23 @@ final class ReadableStreamBody extends EventEmitter implements StreamInterface, 
     private array $chunks = [];
     private bool $ended = false;
     private bool $closed = false;
+    private bool $flushScheduled = false;
 
     public function __construct(
         private readonly ReadableStreamInterface $input,
         private readonly ?int $size = null,
     ) {
         $this->input->on('data', function (string $data): void {
-            if ($this->listeners('data') !== []) {
-                $this->emit('data', [$data]);
-            } else {
+            if ($this->chunks !== [] || $this->listeners('data') === []) {
                 $this->chunks[] = $data;
+                $this->scheduleFlush();
+            } else {
+                $this->emit('data', [$data]);
             }
         });
         $this->input->on('end', function (): void {
             $this->ended = true;
-            $this->flushEnd();
+            $this->scheduleFlush();
         });
         $this->input->on('error', function (\Throwable $error): void {
             $this->handleError($error);
@@ -47,17 +50,8 @@ final class ReadableStreamBody extends EventEmitter implements StreamInterface, 
     {
         parent::on($event, $listener);
 
-        if ($event === 'data' && $this->chunks !== []) {
-            $chunks = $this->chunks;
-            $this->chunks = [];
-
-            foreach ($chunks as $chunk) {
-                $this->emit('data', [$chunk]);
-            }
-        }
-
-        if ($event === 'end') {
-            $this->flushEnd();
+        if ($event === 'data' || $event === 'end' || $event === 'close') {
+            $this->scheduleFlush();
         }
 
         return $this;
@@ -171,13 +165,38 @@ final class ReadableStreamBody extends EventEmitter implements StreamInterface, 
         $this->close();
     }
 
-    private function flushEnd(): void
+    private function scheduleFlush(): void
     {
-        if ($this->closed || !$this->ended || $this->chunks !== [] || $this->listeners('end') === []) {
+        if (
+            $this->closed
+            || $this->flushScheduled
+            || ($this->chunks !== [] && $this->listeners('data') === [])
+            || (!$this->ended && $this->chunks === [])
+        ) {
             return;
         }
 
-        $this->emit('end');
-        $this->close();
+        $this->flushScheduled = true;
+        Loop::futureTick(function (): void {
+            $this->flushScheduled = false;
+
+            if ($this->closed) {
+                return;
+            }
+
+            if ($this->chunks !== [] && $this->listeners('data') !== []) {
+                $chunks = $this->chunks;
+                $this->chunks = [];
+
+                foreach ($chunks as $chunk) {
+                    $this->emit('data', [$chunk]);
+                }
+            }
+
+            if ($this->ended && $this->chunks === []) {
+                $this->emit('end');
+                $this->close();
+            }
+        });
     }
 }
